@@ -18,7 +18,8 @@ from ldm.models.diffusion.ddpm import LatentDiffusion
 from ldm.util import log_txt_as_img, exists, instantiate_from_config
 from ldm.models.diffusion.ddim import DDIMSampler
 
-
+# 传入controlnerolnet输出的stable diffusion
+# control就是controlnet输出的结果
 class ControlledUnetModel(UNetModel):
     def forward(self, x, timesteps=None, context=None, control=None, only_mid_control=False, **kwargs):
         hs = []
@@ -31,6 +32,7 @@ class ControlledUnetModel(UNetModel):
                 hs.append(h)
             h = self.middle_block(h, emb, context)
 
+        # unet结果和controlnet结果相加
         if control is not None:
             h += control.pop()
 
@@ -38,6 +40,7 @@ class ControlledUnetModel(UNetModel):
             if only_mid_control or control is None:
                 h = torch.cat([h, hs.pop()], dim=1)
             else:
+                # unet结果和controlnet结果相加
                 h = torch.cat([h, hs.pop() + control.pop()], dim=1)
             h = module(h, emb, context)
 
@@ -135,6 +138,7 @@ class ControlNet(nn.Module):
             linear(time_embed_dim, time_embed_dim),
         )
 
+        # TimestepEmbedSequential是改进版的nn.Sequential，除了可以传入x，还可以传入emb和context
         self.input_blocks = nn.ModuleList(
             [
                 TimestepEmbedSequential(
@@ -298,7 +302,7 @@ class ControlNet(nn.Module):
             else:
                 h = module(h, emb, context)
             outs.append(zero_conv(h, emb, context))
-
+        # 存controlnet中间结果
         h = self.middle_block(h, emb, context)
         outs.append(self.middle_block_out(h, emb, context))
 
@@ -316,12 +320,14 @@ class ControlLDM(LatentDiffusion):
 
     @torch.no_grad()
     def get_input(self, batch, k, bs=None, *args, **kwargs):
+        # x是latent编码 c是条件
         x, c = super().get_input(batch, self.first_stage_key, *args, **kwargs)
         control = batch[self.control_key]
         if bs is not None:
             control = control[:bs]
         control = control.to(self.device)
         control = einops.rearrange(control, 'b h w c -> b c h w')
+        # control是控制条件
         control = control.to(memory_format=torch.contiguous_format).float()
         return x, dict(c_crossattn=[c], c_concat=[control])
 
@@ -330,12 +336,14 @@ class ControlLDM(LatentDiffusion):
         diffusion_model = self.model.diffusion_model
 
         cond_txt = torch.cat(cond['c_crossattn'], 1)
-
+        # 没有control条件
         if cond['c_concat'] is None:
             eps = diffusion_model(x=x_noisy, timesteps=t, context=cond_txt, control=None, only_mid_control=self.only_mid_control)
         else:
+            # 有control条件hint
             control = self.control_model(x=x_noisy, hint=torch.cat(cond['c_concat'], 1), timesteps=t, context=cond_txt)
             control = [c * scale for c, scale in zip(control, self.control_scales)]
+            # controlnet结果传入unet
             eps = diffusion_model(x=x_noisy, timesteps=t, context=cond_txt, control=control, only_mid_control=self.only_mid_control)
 
         return eps
